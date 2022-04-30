@@ -26,6 +26,7 @@ module KMonad.Model.Action
   , HookLocation(..)
   , Hook(..)
 
+  , WrappedEvent(..)
     -- * Lenses
   , HasHook(..)
   , HasTimeout(..)
@@ -52,11 +53,15 @@ module KMonad.Model.Action
   , awaitMy
   , tHookF
   , hookF
+  , tHookFPrio
+  , hookFPrio
   , within
   , withinHeld
   )
 
 where
+
+import Data.Unique
 
 import KMonad.Prelude hiding (timeout)
 
@@ -113,6 +118,26 @@ makeClassy ''Hook
 
 
 --------------------------------------------------------------------------------
+-- $wrapped
+--
+-- A WrappedEvent wraps a KeyEvent or a hook tag.
+-- 
+data WrappedEvent =
+  WrappedKeyEvent {
+    _catch   :: Catch
+  , _keyEvent :: KeyEvent 
+  } |
+  WrappedTag {
+    _tag :: Unique
+  }
+
+-- | Print out a WrappedKeyEvent nicely.
+instance Display WrappedEvent where
+  textDisplay (WrappedKeyEvent c e) = "WrappedKeyEvent " <> textDisplay e <> ", " <> tshow c
+  textDisplay (WrappedTag t) = "WrappedKeyEvent " <> tshow (hashUnique t)
+
+
+--------------------------------------------------------------------------------
 -- $lop
 --
 -- Operations that manipulate the layer-stack
@@ -141,6 +166,8 @@ class Monad m => MonadKIO m where
   hold       :: Bool -> m ()
   -- | Register a callback hook
   register   :: HookLocation -> Hook m -> m ()
+  -- | Register a priority callback hook
+  registerPrio   :: HookLocation -> Hook m -> m ()
   -- | Run a layer-stack manipulation
   layerOp    :: LayerOp -> m ()
   -- | Insert an event in the input queue
@@ -171,6 +198,10 @@ my s = mkKeyEvent s <$> myBinding
 hookF :: MonadKIO m => HookLocation -> (KeyEvent -> m Catch) -> m ()
 hookF l f = register l . Hook Nothing $ \t -> f (t^.event)
 
+-- | Register a simple priority hook without a timeout
+hookFPrio :: MonadKIO m => HookLocation -> (KeyEvent -> m Catch) -> m ()
+hookFPrio l f = registerPrio l . Hook Nothing $ \t -> f (t^.event)
+
 -- | Register a hook with a timeout
 tHookF :: MonadK m
   => HookLocation         -- ^ Where to install the hook
@@ -179,6 +210,16 @@ tHookF :: MonadK m
   -> (Trigger -> m Catch) -- ^ The action to perform on trigger
   -> m ()                 -- ^ The resulting action
 tHookF l d a f = register l $ Hook (Just $ Timeout d a) f
+
+-- | Register a priority hook with a timeout
+tHookFPrio :: MonadK m
+  => HookLocation         -- ^ Where to install the hook
+  -> Milliseconds         -- ^ The timeout delay for the hook
+  -> m ()                 -- ^ The action to perform on timeout
+  -> (Trigger -> m Catch) -- ^ The action to perform on trigger
+  -> m ()                 -- ^ The resulting action
+tHookFPrio l d a f = registerPrio l $ Hook (Just $ Timeout d a) f
+
 
 -- | Perform an action after a period of time has elapsed
 --
@@ -231,6 +272,7 @@ within d p a f = do
         else within (d - t^.elapsed) p a f *> pure NoCatch
   tHookF InputHook d a f'
 
+-- TODO: Change to priority hook
 -- | Like `within`, but acquires a hold when starting, and releases when done
 withinHeld :: MonadK m
   => Milliseconds          -- ^ The time within which this filter is active

@@ -11,6 +11,8 @@ module KMonad.Keyboard.Types
   )
 where
 
+--import Data.Unique
+
 import KMonad.Prelude
 import KMonad.Keyboard.Keycode
 

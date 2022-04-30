@@ -93,7 +93,8 @@ initAppEnv cfg = do
 
   -- Initialize output components
   otv <- lift . atomically $ newEmptyTMVar
-  ohk <- Hs.mkHooks . atomically . takeTMVar $ otv
+  --ohk <- Hs.mkHooks . atomically . takeTMVar $ otv
+  ohk <- Hs.mkHooks $ (atomically . takeTMVar) otv >>= pure . (WrappedKeyEvent NoCatch)
 
   -- Setup thread to read from outHooks and emit to keysink
   launch_ "emitter_proc" $ do

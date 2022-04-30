@@ -20,6 +20,8 @@ module KMonad.Model.Hooks
   , mkHooks
   , pull
   , register
+  , block
+  , unblock
   )
 where
 
@@ -65,21 +67,27 @@ type Store = M.HashMap Unique Entry
 -- | The 'Hooks' environment that is required for keeping track of all the
 -- different targets and callbacks.
 data Hooks = Hooks
-  { _eventSrc   :: IO KeyEvent   -- ^ Where we get our events from
-  , _injectTmr  :: TMVar Unique  -- ^ Used to signal timeouts
-  , _hooks      :: TVar Store    -- ^ Store of hooks
+  { _eventSrc         :: IO WrappedEvent           -- ^ Where we get our events from
+  , _injectTmr        :: TMVar Unique          -- ^ Used to signal timeouts
+  , _priorityHooks    :: TVar Store            -- ^ Store of priority hooks
+  , _hooks            :: TVar Store            -- ^ Store of hooks
+  , _blocked          :: TVar Int              -- ^ How many locks have been applied to the hooks
+  , _blockBuf         :: TVar [WrappedEvent]       -- ^ Internal buffer to store events while closed
   }
 makeLenses ''Hooks
 
 -- | Create a new 'Hooks' environment which reads events from the provided action
-mkHooks' :: MonadUnliftIO m => m KeyEvent -> m Hooks
+mkHooks' :: MonadUnliftIO m => m WrappedEvent -> m Hooks
 mkHooks' s = withRunInIO $ \u -> do
   itr <- atomically $ newEmptyTMVar
   hks <- atomically $ newTVar M.empty
-  pure $ Hooks (u s) itr hks
+  phks <- atomically $ newTVar M.empty
+  blk <- atomically $ newTVar 0
+  buf <- atomically $ newTVar []
+  pure $ Hooks (u s) itr phks hks blk buf
 
 -- | Create a new 'Hooks' environment, but as a 'ContT' monad to avoid nesting
-mkHooks :: MonadUnliftIO m => m KeyEvent -> ContT r m Hooks
+mkHooks :: MonadUnliftIO m => m WrappedEvent -> ContT r m Hooks
 mkHooks = lift . mkHooks'
 
 -- | Convert a hook in some UnliftIO monad into an IO version, to store it in Hooks
@@ -103,15 +111,17 @@ ioHook h = withRunInIO $ \u -> do
 register :: (HasLogFunc e)
   => Hooks
   -> Hook (RIO e)
+  -> Bool
   -> RIO e ()
-register hs h = do
+register hs h prio = do
   -- Insert an entry into the store
   tag <- liftIO newUnique
+  let targetStore = if prio then priorityHooks else hooks
   e   <- Entry <$> liftIO getSystemTime <*> ioHook h
-  atomically $ modifyTVar (hs^.hooks) (M.insert tag e)
+  atomically $ modifyTVar (hs^.targetStore) (M.insert tag e)
   -- If the hook has a timeout, start a thread that will signal timeout
   case h^.hTimeout of
-    Nothing -> logDebug $ "Registering untimed hook: " <> display (hashUnique tag)
+    Nothing -> logDebug $ "Registering untimed hook: " <> display (hashUnique tag) <> ", priority " <> displayShow prio
     Just t' -> void . async $ do
       logDebug $ "Registering " <> display (t'^.delay)
               <> "ms hook: " <> display (hashUnique tag)
@@ -120,22 +130,81 @@ register hs h = do
 
 -- | Cancel a hook by removing it from the store
 cancelHook :: (HasLogFunc e)
-  => Hooks
+  => TVar Store
   -> Unique
-  -> RIO e ()
-cancelHook hs tag = do
+  -> RIO e Bool
+cancelHook st tag = do
   e <- atomically $ do
-    m <- readTVar $ hs^.hooks
+    m <- readTVar $ st
     let v = M.lookup tag m
-    when (isJust v) $ modifyTVar (hs^.hooks) (M.delete tag)
+    when (isJust v) $ modifyTVar st (M.delete tag)
     pure v
   case e of
-    Nothing ->
+    Nothing -> do
       logDebug $ "Tried cancelling expired hook: " <> display (hashUnique tag)
+      pure False
     Just e' -> do
       logDebug $ "Cancelling hook: " <> display (hashUnique tag)
       liftIO $ e' ^. hTimeout . to fromJust . action
+      pure True
+  -- atomically $ do
+  --   prioTag <- tryTakeTMVar (hs^.priorityTag)
+  --   case prioTag of
+  --     Just t -> when (t /= tag) $ putTMVar (hs^.priorityTag) t
+  --     Nothing -> return ()
+  --   case prioTag of
+  --     Just t -> 
+  --   when (t <> tag) $ 
+  -- -- TODO: This is ugly, and should probably also be done atomically
+  -- case prioTag of
+  --   Just t -> do
+  --     _ <- when (t == tag) $ atomically $ tryTakeTMVar (hs^.priorityTag)
+  --     return ()
+  --   Nothing -> return ()
 
+-- | Increase the block-count by 1
+block :: HasLogFunc e => Hooks -> RIO e ()
+block hs = do
+  n <- atomically $ do
+    modifyTVar' (hs^.blocked) (+1)
+    readTVar (hs^.blocked)
+  logDebug $ "Hooks block level set to: " <> display n
+
+-- | Set Hooks to unblocked mode, return a list of all the stored events
+-- that should be rerun, in the correct order (head was first-in, etc).
+--
+-- NOTE: After successfully unblocking, blockBuf will be empty, it is the
+-- caller's responsibility to insert the returned events at an appropriate
+-- location in the 'KMonad.App.App'.
+--
+-- We do this in KMonad by writing the events into the
+-- 'KMonad.Model.Dispatch.Dispatch's rerun buffer. (this happens in the
+-- "KMonad.App" module.)
+unblock :: HasLogFunc e => Hooks -> RIO e [WrappedEvent]
+unblock hs = do
+  n <- atomically $ do
+    modifyTVar' (hs^.blocked) (\n -> n - 1)
+    readTVar (hs^.blocked)
+  case n of
+    0 -> do
+      es <- atomically $ readTVar (hs^.blockBuf)
+      atomically $ writeTVar (hs^.blockBuf) []
+      logDebug $ "Unblocking hooks input stream, " <>
+        if null es
+        then "no stored events"
+        else "rerunning:\n" <> (display . unlines . map textDisplay $ reverse es)
+      pure $ reverse es
+    n -> do
+      logDebug $ "Hooks block level set to: " <> display n
+      pure []
+
+-- | Put the WrappedEvent into blockBuf to play back later
+store :: HasLogFunc e => Hooks -> WrappedEvent -> RIO e ()
+store hs e = do
+  atomically $ modifyTVar' (hs^.blockBuf) (e:)
+  readTVarIO (hs^.blockBuf) >>= \es -> do
+    let xs = map ((" - " <>) . textDisplay) es
+    logDebug . display . unlines $ "Storing event, current store: ":xs
 
 --------------------------------------------------------------------------------
 -- $run
@@ -150,17 +219,15 @@ runEntry t e v = liftIO $ do
 
 -- | Run all hooks on the current event and reset the store
 runHooks :: (HasLogFunc e)
-  => Hooks
+  => TVar Store
   -> KeyEvent
-  -> RIO e (Maybe KeyEvent)
-runHooks hs e = do
+  -- -> RIO e (Maybe KeyEvent)
+  -> RIO e Catch
+runHooks st e = do
   logDebug "Running hooks"
-  m   <- atomically $ swapTVar (hs^.hooks) M.empty
+  m   <- atomically $ swapTVar st M.empty
   now <- liftIO getSystemTime
-  foldMapM (runEntry now e) (M.elems m) >>= \case
-    Catch   -> pure $ Nothing
-    NoCatch -> pure $ Just e
-
+  foldMapM (runEntry now e) (M.elems m)
 
 --------------------------------------------------------------------------------
 -- $loop
@@ -181,16 +248,45 @@ step h = do
 
   -- Asynchronously start reading the next event
   a <- async . liftIO $ h^.eventSrc
- 
+
   -- Handle any timer event first, and then try to read from the source
   let next = (Left <$> takeTMVar (h^.injectTmr)) `orElse` (Right <$> waitSTM a)
 
   -- Keep taking and cancelling timers until we encounter a key event, then run
   -- the hooks on that event.
   let read = atomically next >>= \case
-        Left  t -> cancelHook h t >> read -- We caught a cancellation
-        Right e -> runHooks h e           -- We caught a real event
+      --Left  t -> cancelHook (h^.hooks) t >> read -- We caught a cancellation
+        Left t -> handleTag t >> read
+        Right (WrappedTag t) -> handleTag t >> pure Nothing
+        Right (WrappedKeyEvent c e) -> handleEvent c e           -- We caught a real event
   read
+
+  where
+    handleTag t = do
+      n <- readTVarIO (h^.blocked)
+      case n of
+        0 -> handleTagOpen t
+        _ -> handleTagClosed t
+
+    handleEvent c e = do
+      cPrio <- runHooks (h^.priorityHooks) e
+      n <- readTVarIO (h^.blocked)
+      case n of
+        0 -> do
+          cReg <- runHooks (h^.hooks) e
+          case c <> cPrio <> cReg of
+            NoCatch -> pure $ Just e
+            Catch -> pure Nothing
+        _ -> store h (WrappedKeyEvent (c <> cPrio) e) >> pure Nothing
+
+    handleTagOpen t = do
+      _ <- cancelHook (h^.priorityHooks) t
+      cancelHook (h^.hooks) t >> pure ()
+
+    handleTagClosed t = do
+      found <- cancelHook (h^.priorityHooks) t
+      unless found $ store h (WrappedTag t)
+      
 
 -- | Keep stepping until we succesfully get an unhandled 'KeyEvent'
 pull :: HasLogFunc e

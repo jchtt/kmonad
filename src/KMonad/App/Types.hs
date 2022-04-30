@@ -111,16 +111,24 @@ instance (HasAppEnv e, HasAppCfg e, HasLogFunc e) => MonadKIO (RIO e) where
 
   -- Holding and rerunning through the sluice and dispatch
   hold b = do
-    sl <- view sluice
+    --sl <- view sluice
     di <- view dispatch
-    if b then Sl.block sl else Sl.unblock sl >>= Dp.rerun di
+    hs <- view inHooks
+    if b then Hs.block hs else Hs.unblock hs >>= Dp.rerun di
+    --if b then Sl.block sl else Sl.unblock sl <&> map (WrappedKeyEvent NoCatch) >>= Dp.rerun di
 
   -- Hooking is performed with the hooks component
   register l h = do
     hs <- case l of
       InputHook  -> view inHooks
       OutputHook -> view outHooks
-    Hs.register hs h
+    Hs.register hs h False
+
+  registerPrio l h = do
+    hs <- case l of
+      InputHook  -> view inHooks
+      OutputHook -> view outHooks
+    Hs.register hs h True
 
   -- Layer-ops are sent to the 'Keymap'
   layerOp o = view keymap >>= \hl -> Km.layerOp hl o
@@ -129,7 +137,7 @@ instance (HasAppEnv e, HasAppCfg e, HasLogFunc e) => MonadKIO (RIO e) where
   inject e = do
     di <- view dispatch
     logDebug $ "Injecting event: " <> display e
-    Dp.rerun di [e]
+    Dp.rerun di [WrappedKeyEvent NoCatch e]
 
   -- Shell-command through spawnCommand
   shellCmd t = do

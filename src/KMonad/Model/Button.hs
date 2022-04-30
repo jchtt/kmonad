@@ -278,7 +278,7 @@ tapNextRelease t h = onPress $ do
   go []
   where
     go :: MonadK m => [Keycode] ->  m ()
-    go ks = hookF InputHook $ \e -> do
+    go ks = hookFPrio InputHook $ \e -> do
       p <- matchMy Release
       let isRel = isRelease e
       if
@@ -322,7 +322,7 @@ tapHoldNextRelease ms t h mtb = onPress $ do
   where
 
     go :: MonadK m => Milliseconds -> [Keycode] ->  m ()
-    go ms' ks = tHookF InputHook ms' onTimeout $ \r -> do
+    go ms' ks = tHookFPrio InputHook ms' onTimeout $ \r -> do
       p <- matchMy Release
       let e = r^.event
       let isRel = isRelease e
