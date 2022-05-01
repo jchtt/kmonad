@@ -125,7 +125,7 @@ press b = do
 emitB :: Keycode -> Button
 emitB c = mkButton
   (emit $ mkPress c)
-  (emit $ mkRelease c)
+  (inject $ mkPassthroughEvent $ mkRelease c)
 
 -- | Create a new button that first presses a 'Keycode' before running an inner
 -- button, releasing the 'Keycode' again after the inner 'Button' is released.
@@ -200,7 +200,7 @@ aroundNextTimeout ::
   -> Button       -- ^ The 'Button' to use to surround next
   -> Button       -- ^ The 'Button' to tap on timeout
   -> Button       -- ^ The resulting button
-aroundNextTimeout d b t = onPress $ within InputHook d (pure isPress) (tap t) $ \trig -> do
+aroundNextTimeout d b t = onPress $ within d (pure isPress) (tap t) $ \trig -> do
   runAction $ b^.pressAction
   await (isReleaseOf $ trig^.event.keycode) $ \_ -> do
     runAction $ b^.releaseAction
@@ -255,7 +255,7 @@ tapNext t h = onPress $ hookF InputHook $ \e -> do
 
 -- | Like 'tapNext', except that after some interval it switches anyways
 tapHoldNext :: Milliseconds -> Button -> Button -> Maybe Button -> Button
-tapHoldNext ms t h mtb = onPress $ within InputHook ms (pure $ const True) onTimeout $ \tr -> do
+tapHoldNext ms t h mtb = onPress $ within ms (pure $ const True) onTimeout $ \tr -> do
   p <- matchMy Release
   if p $ tr^.event
     then tap t   *> pure Catch
@@ -263,6 +263,8 @@ tapHoldNext ms t h mtb = onPress $ within InputHook ms (pure $ const True) onTim
   where
     onTimeout :: MonadK m =>  m ()
     onTimeout = press $ fromMaybe h mtb
+
+
 
 -- | Create a tap-hold style button that makes its decision based on the next
 -- detected release in the following manner:
@@ -278,7 +280,7 @@ tapNextRelease t h = onPress $ do
   go []
   where
     go :: MonadK m => [Keycode] ->  m ()
-    go ks = hookF InputHookPrio $ \e -> do
+    go ks = hookF InputHook $ \e -> do
       p <- matchMy Release
       let isRel = isRelease e
       if
@@ -300,7 +302,7 @@ tapNextRelease t h = onPress $ do
     -- then we catch the release of ButtonX that triggered this action, and then
     -- we rethrow this release.
     doHold :: MonadK m => KeyEvent -> m Catch
-    doHold e = press h *> hold False *> inject e *> pure Catch
+    doHold e = press h *> hold False *> inject (mkHandledEvent e) *> pure Catch
 
 
 
@@ -322,7 +324,7 @@ tapHoldNextRelease ms t h mtb = onPress $ do
   where
 
     go :: MonadK m => Milliseconds -> [Keycode] ->  m ()
-    go ms' ks = tHookF InputHookPrio ms' onTimeout $ \r -> do
+    go ms' ks = tHookF InputHook ms' onTimeout $ \r -> do
       p <- matchMy Release
       let e = r^.event
       let isRel = isRelease e
@@ -343,7 +345,7 @@ tapHoldNextRelease ms t h mtb = onPress $ do
     onRelSelf = tap t *> hold False *> pure Catch
 
     onRelOther :: MonadK m => KeyEvent -> m Catch
-    onRelOther e = press h *> hold False *> inject e *> pure Catch
+    onRelOther e = press h *> hold False *> inject (mkHandledEvent e) *> pure Catch
 
 
 -- | Create a 'Button' that contains a number of delays and 'Button's. As long
@@ -434,14 +436,14 @@ stickyKey ms b = onPress $ go
          -- The release of some other button; ignore these
 
   doHold :: MonadK m => KeyEvent -> m ()
-  doHold e = press b *> inject e
+  doHold e = press b *> inject (mkHandledEvent e)
 
   doTap :: MonadK m => m ()
   doTap =
-    within InputHook ms
+    within ms
            (pure isPress)  -- presses definitely happen after us
            (pure ())
            (\t -> (runAction $ b^.pressAction)
-               *> inject (t^.event)
+               *> inject (mkHandledEvent (t^.event))
                *> after 3 (runAction $ b^.releaseAction)
                $> Catch)

@@ -84,19 +84,16 @@ initAppEnv cfg = do
   src <- using $ cfg^.keySourceDev
 
   -- Initialize the pull-chain components
-  itr <- atomically $ newEmptyTMVar
-  dsp <- Dp.mkDispatch (awaitKey src) itr
-  ihkPrio <- Hs.mkHooks (Dp.pull dsp) itr
-  slc <- Sl.mkSluice $ Hs.pull ihkPrio
-  ihk <- Hs.mkHooks (Sl.pull slc) itr
+  dsp <- Dp.mkDispatch $ awaitKey src
+  ihk <- Hs.mkHooks    $ Dp.pull  dsp
+  slc <- Sl.mkSluice   $ Hs.pull  ihk
 
   -- Initialize the button environments in the keymap
   phl <- Km.mkKeymap (cfg^.firstLayer) (cfg^.keymapCfg)
 
   -- Initialize output components
   otv <- lift . atomically $ newEmptyTMVar
-  otr <- atomically $ newEmptyTMVar
-  ohk <- Hs.mkHooks ((atomically . takeTMVar) otv >>= pure . (WrappedKeyEvent NoCatch)) otr
+  ohk <- Hs.mkHooks $ (atomically . takeTMVar) otv >>= pure . mkHandledEvent
 
   -- Setup thread to read from outHooks and emit to keysink
   launch_ "emitter_proc" $ do
@@ -110,9 +107,8 @@ initAppEnv cfg = do
     , _keySource = src
 
     , _dispatch  = dsp
-    , _inHooksPrio = ihkPrio
-    , _sluice    = slc
     , _inHooks   = ihk
+    , _sluice    = slc
 
     , _keymap    = phl
     , _outHooks  = ohk
@@ -126,6 +122,12 @@ initAppEnv cfg = do
 --
 -- FIXME: this needs to live somewhere else
 
+-- | Handle passthrough event by directly emitting press or release
+passthroughEvent :: (HasAppEnv e, HasLogFunc e, HasAppCfg e) => KeyEvent -> RIO e ()
+passthroughEvent e 
+  | e^.switch == Press   = emit $ mkPress $ e^.keycode
+  | e^.switch == Release = emit $ mkRelease $ e^.keycode
+
 -- | Trigger the button-action press currently registered to 'Keycode'
 pressKey :: (HasAppEnv e, HasLogFunc e, HasAppCfg e) => Keycode -> RIO e ()
 pressKey c =
@@ -137,8 +139,8 @@ pressKey c =
       if ft
         then do
           emit $ mkPress c
-          await (isReleaseOf c) $ \_ -> do
-            emit $ mkRelease c
+          await (isReleaseOf c) $ \e -> do
+            inject $ mkPassthroughEvent (mkRelease c)
             pure Catch
         else pure ()
 
@@ -167,9 +169,10 @@ pressKey c =
 -- 1. Pull from the pull-chain until an unhandled event reaches us.
 -- 2. If that event is a 'Press' we use our keymap to trigger an action.
 loop :: RIO AppEnv ()
-loop = forever $ view inHooks >>= Hs.pull >>= \case
-  WrappedKeyEvent c e | c == NoCatch && e^.switch == Press -> pressKey $ e^.keycode
-  _                      -> pure ()
+loop = forever $ view sluice >>= Sl.pull >>= \case
+  e | _passthrough e                     -> passthroughEvent $ _wrappedEvent e --TODO: lenses do not seem to work here, what's wrong?
+  e | (_wrappedEvent e)^.switch == Press -> pressKey $ (_wrappedEvent e)^.keycode
+  _                                      -> pure ()
 
 -- | Run KMonad using the provided configuration
 startApp :: HasLogFunc e => AppCfg -> RIO e ()

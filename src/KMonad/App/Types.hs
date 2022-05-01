@@ -66,10 +66,9 @@ data AppEnv = AppEnv
   , _keySource  :: KeySource
 
     -- Pull chain
-  , _dispatch    :: Dp.Dispatch
-  , _inHooksPrio :: Hs.Hooks
-  , _sluice      :: Sl.Sluice
-  , _inHooks     :: Hs.Hooks
+  , _dispatch   :: Dp.Dispatch
+  , _inHooks    :: Hs.Hooks
+  , _sluice     :: Sl.Sluice
 
     -- Other components
   , _keymap     :: Km.Keymap
@@ -119,7 +118,6 @@ instance (HasAppEnv e, HasAppCfg e, HasLogFunc e) => MonadKIO (RIO e) where
   -- Hooking is performed with the hooks component
   register l h = do
     hs <- case l of
-      InputHookPrio -> view inHooksPrio
       InputHook  -> view inHooks
       OutputHook -> view outHooks
     Hs.register hs h
@@ -131,7 +129,7 @@ instance (HasAppEnv e, HasAppCfg e, HasLogFunc e) => MonadKIO (RIO e) where
   inject e = do
     di <- view dispatch
     logDebug $ "Injecting event: " <> display e
-    Dp.rerun di [WrappedKeyEvent NoCatch e]
+    Dp.rerun di [e]
 
   -- Shell-command through spawnCommand
   shellCmd t = do
